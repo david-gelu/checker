@@ -138,9 +138,12 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
-/** Sortează elementele de top-level ale unui array după reprezentarea JSON canonică. */
+/**
+ * Sortează elementele unui array după cheia canonică, dar păstrează valorile originale.
+ * canonicalize() e folosit DOAR ca cheie de sortare, nu modifică datele efective.
+ */
 function sortArray(arr: unknown[]): unknown[] {
-  return arr.map(canonicalize).sort((a, b) => naturalCompare(a, b));
+  return [...arr].sort((a, b) => naturalCompare(a, b));
 }
 
 // ─── Deep Diff Engine ──────────────────────────────────────────────────────────
@@ -149,13 +152,16 @@ function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
 
   if (Array.isArray(a) && Array.isArray(b)) {
-    const len = Math.max(a.length, b.length);
+    // Sort nested arrays by canonical key before comparing position-by-position
+    const sortedA = path === '' ? a : sortArray(a);
+    const sortedB = path === '' ? b : sortArray(b);
+    const len = Math.max(sortedA.length, sortedB.length);
     for (let i = 0; i < len; i++) {
       const p = `${path}[${i}]`;
-      if (i >= a.length) diffs.added.push({ path: p, value: b[i] });
-      else if (i >= b.length) diffs.removed.push({ path: p, value: a[i] });
+      if (i >= sortedA.length) diffs.added.push({ path: p, value: sortedB[i] });
+      else if (i >= sortedB.length) diffs.removed.push({ path: p, value: sortedA[i] });
       else {
-        const n = deepDiff(a[i], b[i], p);
+        const n = deepDiff(sortedA[i], sortedB[i], p);
         diffs.added.push(...n.added);
         diffs.removed.push(...n.removed);
         diffs.changed.push(...n.changed);
@@ -182,7 +188,7 @@ function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
     return diffs;
   }
 
-  if (JSON.stringify(a) !== JSON.stringify(b))
+  if (JSON.stringify(canonicalize(a)) !== JSON.stringify(canonicalize(b)))
     diffs.changed.push({ path: path || "(root)", from: a, to: b });
   else diffs.same.push({ path: path || "(root)", value: a });
 
