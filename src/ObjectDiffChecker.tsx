@@ -129,14 +129,19 @@ function isPlainObj(v: unknown): v is Record<string, unknown> {
  * Canonicalizează recursiv: sortează cheile obiectelor și elementele
  * array-urilor după reprezentarea JSON, pentru o comparație stabilă.
  */
+// Natural sort comparator — handles numbers, zero-padded strings, mixed content
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function naturalCompare(a: unknown, b: unknown): number {
+  const sa = JSON.stringify(canonicalize(a)) ?? '';
+  const sb = JSON.stringify(canonicalize(b)) ?? '';
+  return collator.compare(sa, sb);
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
     const mapped = value.map(canonicalize);
-    return mapped.sort((a, b) => {
-      const sa = JSON.stringify(a);
-      const sb = JSON.stringify(b);
-      return sa < sb ? -1 : sa > sb ? 1 : 0;
-    });
+    return mapped.sort((a, b) => naturalCompare(a, b));
   }
   if (isPlainObj(value)) {
     const sorted: Record<string, unknown> = {};
@@ -157,11 +162,7 @@ function sortDeep(value: unknown): { sorted: unknown; changed: boolean } {
     const mappedResults = value.map(sortDeep);
     const mappedArr = mappedResults.map((r) => r.sorted);
     const innerChanged = mappedResults.some((r) => r.changed);
-    const sortedArr = [...mappedArr].sort((a, b) => {
-      const sa = JSON.stringify(canonicalize(a));
-      const sb = JSON.stringify(canonicalize(b));
-      return sa < sb ? -1 : sa > sb ? 1 : 0;
-    });
+    const sortedArr = [...mappedArr].sort((a, b) => naturalCompare(a, b));
     const orderChanged =
       innerChanged ||
       sortedArr.some((v, i) => JSON.stringify(canonicalize(v)) !== JSON.stringify(canonicalize(mappedArr[i])));

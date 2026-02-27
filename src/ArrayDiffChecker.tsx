@@ -114,14 +114,19 @@ function isPlainObj(v: unknown): v is Record<string, unknown> {
  * sub-array-urile, astfel încât comparația să fie stabilă indiferent
  * de ordinea originală.
  */
+// Natural sort comparator — handles numbers, zero-padded strings, mixed content
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function naturalCompare(a: unknown, b: unknown): number {
+  const sa = JSON.stringify(canonicalize(a)) ?? '';
+  const sb = JSON.stringify(canonicalize(b)) ?? '';
+  return collator.compare(sa, sb);
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
     const mapped = value.map(canonicalize);
-    return mapped.sort((a, b) => {
-      const sa = JSON.stringify(a);
-      const sb = JSON.stringify(b);
-      return sa < sb ? -1 : sa > sb ? 1 : 0;
-    });
+    return mapped.sort((a, b) => naturalCompare(a, b));
   }
   if (isPlainObj(value)) {
     const sorted: Record<string, unknown> = {};
@@ -135,11 +140,7 @@ function canonicalize(value: unknown): unknown {
 
 /** Sortează elementele de top-level ale unui array după reprezentarea JSON canonică. */
 function sortArray(arr: unknown[]): unknown[] {
-  return arr.map(canonicalize).sort((a, b) => {
-    const sa = JSON.stringify(a);
-    const sb = JSON.stringify(b);
-    return sa < sb ? -1 : sa > sb ? 1 : 0;
-  });
+  return arr.map(canonicalize).sort((a, b) => naturalCompare(a, b));
 }
 
 // ─── Deep Diff Engine ──────────────────────────────────────────────────────────
