@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import { useState, useCallback } from "react";
 import {
   AlertCircle,
   CheckCircle,
@@ -9,6 +9,7 @@ import {
   Minus,
   Plus,
   RefreshCw,
+  ArrowUpDown,
 } from "lucide-react";
 import {
   Card,
@@ -26,7 +27,6 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
 
 interface DuplicateEntry {
   item: unknown;
@@ -69,9 +69,9 @@ interface AnalysisResults {
   areIdentical: boolean;
   sameUniqueElements: boolean;
   diff: DiffResult;
+  wasSorted: boolean;
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
 
 function findDuplicates(arr: unknown[]): DuplicateEntry[] {
   const counts: Record<string, number> = {};
@@ -103,11 +103,37 @@ function safeParse(raw: string): unknown[] {
   return parsed as unknown[];
 }
 
-// ─── Deep Diff Engine ──────────────────────────────────────────────────────────
-
 function isPlainObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const mapped = value.map(canonicalize);
+    return mapped.sort((a, b) => {
+      const sa = JSON.stringify(a);
+      const sb = JSON.stringify(b);
+      return sa < sb ? -1 : sa > sb ? 1 : 0;
+    });
+  }
+  if (isPlainObj(value)) {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = canonicalize(value[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+function sortArray(arr: unknown[]): unknown[] {
+  return arr.map(canonicalize).sort((a, b) => {
+    const sa = JSON.stringify(a);
+    const sb = JSON.stringify(b);
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
+  });
+}
+
 
 function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
@@ -133,10 +159,10 @@ function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
     for (const key of keys) {
       const p = path ? `${path}.${key}` : key;
-      if (!(key in a)) diffs.added.push({ path: p, value: b[key] });
-      else if (!(key in b)) diffs.removed.push({ path: p, value: a[key] });
+      if (!(key in a)) diffs.added.push({ path: p, value: (b as Record<string, unknown>)[key] });
+      else if (!(key in b)) diffs.removed.push({ path: p, value: (a as Record<string, unknown>)[key] });
       else {
-        const n = deepDiff(a[key], b[key], p);
+        const n = deepDiff((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], p);
         diffs.added.push(...n.added);
         diffs.removed.push(...n.removed);
         diffs.changed.push(...n.changed);
@@ -153,25 +179,16 @@ function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   return diffs;
 }
 
-// ─── UI Helpers ────────────────────────────────────────────────────────────────
 
 function ValueDisplay({ value }: { value: unknown }) {
   if (value === null) return <span className="italic">null</span>;
   if (value === undefined) return <span className="italic">undefined</span>;
-  if (typeof value === "boolean")
-    return <span className="font-mono">{value.toString()}</span>;
-  if (typeof value === "number")
-    return <span className="font-mono">{value}</span>;
-  if (typeof value === "string")
-    return <span className="font-mono">"{value}"</span>;
-  if (Array.isArray(value))
-    return <span className="font-mono">[{value.length} elem.]</span>;
+  if (typeof value === "boolean") return <span className="font-mono">{value.toString()}</span>;
+  if (typeof value === "number") return <span className="font-mono">{value}</span>;
+  if (typeof value === "string") return <span className="font-mono">"{value}"</span>;
+  if (Array.isArray(value)) return <span className="font-mono">[{value.length} elem.]</span>;
   if (isPlainObj(value))
-    return (
-      <span className="font-mono">
-        {"{"} {Object.keys(value).length} chei{"}"}
-      </span>
-    );
+    return <span className="font-mono">{"{"} {Object.keys(value).length} chei{"}"}</span>;
   return <span className="font-mono">{JSON.stringify(value)}</span>;
 }
 
@@ -208,55 +225,33 @@ function DiffRow({ type, path, from, to, value }: DiffItem) {
   }[type];
 
   return (
-    <div
-      className={cn(
-        "flex items-center gap-2 px-4 py-3 rounded-xl border text-xs font-mono",
-        cfg.bg,
-        cfg.border
-      )}
-    >
+    <div className={cn("flex items-center gap-2 px-4 py-3 rounded-xl border text-xs font-mono", cfg.bg, cfg.border)}>
       <div className="flex items-center gap-2 min-w-0 flex-1">
         <Badge
           variant="outline"
-          className={cn(
-            "text-[9px] font-bold tracking-widest shrink-0 px-1.5 py-0.5 flex items-center gap-1",
-            cfg.badge
-          )}
+          className={cn("text-[9px] font-bold tracking-widest shrink-0 px-1.5 py-0.5 flex items-center gap-1", cfg.badge)}
         >
           {cfg.icon}
           {cfg.label}
         </Badge>
         <span className="truncate">{path}</span>
       </div>
-
       {type === "changed" && (
         <div className="flex items-center gap-2 shrink-0">
-          <span className="line-through opacity-70">
-            <ValueDisplay value={from} />
-          </span>
+          <span className="line-through opacity-70"><ValueDisplay value={from} /></span>
           <ChevronRight size={11} />
           <ValueDisplay value={to} />
         </div>
       )}
-
       {(type === "added" || type === "removed" || type === "same") && (
-        <div className="shrink-0">
-          <ValueDisplay value={value} />
-        </div>
+        <div className="shrink-0"><ValueDisplay value={value} /></div>
       )}
     </div>
   );
 }
 
-// ─── Duplicates Alert ──────────────────────────────────────────────────────────
 
-function DuplicatesAlert({
-  label,
-  duplicates,
-}: {
-  label: string;
-  duplicates: DuplicateEntry[];
-}) {
+function DuplicatesAlert({ label, duplicates }: { label: string; duplicates: DuplicateEntry[] }) {
   if (!duplicates.length) return null;
   return (
     <Alert variant="destructive" className="bg-red-950/40 border-red-500/30 text-red-300 w-full">
@@ -278,7 +273,6 @@ function DuplicatesAlert({
   );
 }
 
-// ─── Main Component ────────────────────────────────────────────────────────────
 
 export default function ArrayDiffChecker() {
   const [array1, setArray1] = useState<string>("");
@@ -288,13 +282,23 @@ export default function ArrayDiffChecker() {
   const [activeTab, setActiveTab] = useState<string>("all");
   const [showSame, setShowSame] = useState<boolean>(false);
 
+  const hasSingleQuotes = useCallback((val: string) => /(?<![\\])'/.test(val), []);
+
+  const replaceSingleQuotes = useCallback((val: string) => val.replace(/(?<!\\)'/g, '"'), []);
+
   const analyzeArrays = useCallback(() => {
     setError(null);
     setResults(null);
-
     try {
-      const arr1 = safeParse(array1);
-      const arr2 = safeParse(array2);
+      const arr1Raw = safeParse(array1);
+      const arr2Raw = safeParse(array2);
+
+      const arr1 = sortArray(arr1Raw);
+      const arr2 = sortArray(arr2Raw);
+
+      const wasSorted =
+        !arraysAreIdentical(arr1Raw, arr1) ||
+        !arraysAreIdentical(arr2Raw, arr2);
 
       const set1 = new Set(arr1.map((v) => JSON.stringify(v)));
       const set2 = new Set(arr2.map((v) => JSON.stringify(v)));
@@ -309,6 +313,7 @@ export default function ArrayDiffChecker() {
         areIdentical: arraysAreIdentical(arr1, arr2),
         sameUniqueElements: sameUniqueSet(arr1, arr2),
         diff: deepDiff(arr1, arr2),
+        wasSorted,
       });
       setActiveTab("all");
       setShowSame(false);
@@ -326,11 +331,7 @@ export default function ArrayDiffChecker() {
 
   const tabs: TabConfig[] = diff
     ? [
-      {
-        id: "all",
-        label: "Toate",
-        count: diff.added.length + diff.removed.length + diff.changed.length,
-      },
+      { id: "all", label: "Toate", count: diff.added.length + diff.removed.length + diff.changed.length },
       { id: "changed", label: "Modificate", count: diff.changed.length },
       { id: "added", label: "Adăugate", count: diff.added.length },
       { id: "removed", label: "Eliminate", count: diff.removed.length },
@@ -351,17 +352,12 @@ export default function ArrayDiffChecker() {
               ...diff.changed.map((d) => ({ type: "changed" as DiffType, ...d })),
               ...diff.added.map((d) => ({ type: "added" as DiffType, ...d })),
               ...diff.removed.map((d) => ({ type: "removed" as DiffType, ...d })),
-              ...(showSame
-                ? diff.same.map((d) => ({ type: "same" as DiffType, ...d }))
-                : []),
+              ...(showSame ? diff.same.map((d) => ({ type: "same" as DiffType, ...d })) : []),
             ]
     : [];
 
   return (
-    <Card
-      className="min-h-auto"
-      style={{ fontFamily: "'IBM Plex Mono','Fira Code','Courier New',monospace" }}
-    >
+    <Card className="min-h-auto" style={{ fontFamily: "'IBM Plex Mono','Fira Code','Courier New',monospace" }}>
       <CardHeader className="space-y-6">
         <CardTitle className="border-b border-slate-800 pb-4">
           <h1 className="text-lg font-black tracking-tight">
@@ -377,32 +373,42 @@ export default function ArrayDiffChecker() {
       </CardHeader>
 
       <CardContent className="max-w-6xl mx-auto p-6 space-y-5">
-        {/* Input panels */}
         <div className="grid md:grid-cols-2 gap-4">
           {(["Array 1", "Array 2"] as const).map((label, idx) => {
             const value = idx === 0 ? array1 : array2;
             const setter = idx === 0 ? setArray1 : setArray2;
-            const accent =
-              idx === 0
-                ? "border-cyan-500/30 focus-within:border-cyan-500/60"
-                : "border-violet-500/30 focus-within:border-violet-500/60";
+            const accent = idx === 0
+              ? "border-cyan-500/30 focus-within:border-cyan-500/60"
+              : "border-violet-500/30 focus-within:border-violet-500/60";
             const titleColor = idx === 0 ? "text-cyan-400" : "text-violet-400";
+            const hasQuotes = hasSingleQuotes(value);
             return (
               <Card key={label} className={cn("transition-colors", accent.split(" ")[1])}>
                 <CardHeader className="pb-2 pt-3 px-4">
-                  <CardTitle className={cn("text-sm font-black tracking-wider", titleColor)}>
-                    {label}
-                  </CardTitle>
+                  <div className="flex items-center justify-between gap-2">
+                    <CardTitle className={cn("text-sm font-black tracking-wider", titleColor)}>{label}</CardTitle>
+                    {hasQuotes && (
+                      <button
+                        onClick={() => { setter(replaceSingleQuotes(value)); setResults(null); }}
+                        className={cn(
+                          "flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold tracking-wider border transition-all animate-pulse",
+                          idx === 0
+                            ? "bg-cyan-950/60 border-cyan-500/50 text-cyan-300 hover:bg-cyan-900/80 hover:animate-none"
+                            : "bg-violet-950/60 border-violet-500/50 text-violet-300 hover:bg-violet-900/80 hover:animate-none"
+                        )}
+                      >
+                        <span className="font-mono text-xs">'→"</span>
+                        <span className="ml-0.5">ÎNLOCUIEȘTE</span>
+                      </button>
+                    )}
+                  </div>
                   <CardDescription>Array JSON valid</CardDescription>
                 </CardHeader>
                 <CardContent className="px-3 pb-3">
                   <div className={cn("rounded-lg border transition-colors", accent)}>
                     <Textarea
                       value={value}
-                      onChange={(e) => {
-                        setter(e.target.value);
-                        setResults(null);
-                      }}
+                      onChange={(e) => { setter(e.target.value); setResults(null); }}
                       placeholder='["item1", "item2", "item3"]'
                       className="min-h-56 border-0 bg-transparent font-mono text-sm resize-none focus-visible:ring-0 focus-visible:ring-offset-0 leading-relaxed"
                       spellCheck={false}
@@ -414,7 +420,6 @@ export default function ArrayDiffChecker() {
           })}
         </div>
 
-        {/* Analyze button */}
         <Button
           onClick={analyzeArrays}
           disabled={!array1.trim() || !array2.trim()}
@@ -432,37 +437,39 @@ export default function ArrayDiffChecker() {
           </Alert>
         )}
 
-        {/* Results */}
         {results && diff && (
           <CardFooter className="space-y-4 flex flex-col items-stretch p-0">
 
-            {/* ── Equality verdict ── */}
+            {results.wasSorted && (
+              <Alert className="bg-sky-950/40 border-sky-500/30">
+                <ArrowUpDown className="h-4 w-4 text-sky-400" />
+                <AlertTitle className="text-sky-400 font-bold">
+                  Array-urile au fost sortate automat
+                </AlertTitle>
+                <AlertDescription className="text-slate-400">
+                  Ordinea originală a fost normalizată înainte de comparare — diferențele reflectă valorile, nu poziția lor.
+                </AlertDescription>
+              </Alert>
+            )}
+
             {results.areIdentical ? (
               <Alert className="bg-emerald-950/40 border-emerald-500/30">
                 <CheckCircle className="h-4 w-4 text-emerald-400" />
-                <AlertTitle className="text-emerald-400 font-bold">
-                  Array-urile sunt identice ✓
-                </AlertTitle>
+                <AlertTitle className="text-emerald-400 font-bold">Array-urile sunt identice ✓</AlertTitle>
                 <AlertDescription className="text-slate-400">
-                  {results.length1} elemente — aceeași ordine, aceleași valori.
+                  {results.length1} elemente — aceleași valori.
                 </AlertDescription>
               </Alert>
             ) : results.sameUniqueElements ? (
               <Alert className="bg-amber-950/40 border-amber-500/30">
                 <Equal className="h-4 w-4 text-amber-400" />
-                <AlertTitle className="text-amber-400 font-bold">
-                  Aceleași elemente unice, dar nu identice
-                </AlertTitle>
-                <AlertDescription className="text-slate-400">
-                  Diferă prin ordine sau număr de duplicate.
-                </AlertDescription>
+                <AlertTitle className="text-amber-400 font-bold">Aceleași elemente unice, dar nu identice</AlertTitle>
+                <AlertDescription className="text-slate-400">Diferă prin numărul de duplicate.</AlertDescription>
               </Alert>
             ) : (
               <Alert className="bg-red-950/40 border-red-500/30">
                 <AlertCircle className="h-4 w-4 text-red-400" />
-                <AlertTitle className="text-red-400 font-bold">
-                  Array-urile sunt diferite
-                </AlertTitle>
+                <AlertTitle className="text-red-400 font-bold">Array-urile sunt diferite</AlertTitle>
                 <AlertDescription className="text-slate-400">
                   Există elemente prezente în unul dar nu în celălalt.
                 </AlertDescription>
@@ -471,7 +478,6 @@ export default function ArrayDiffChecker() {
 
             <Separator className="bg-slate-800" />
 
-            {/* ── Stats ── */}
             <div className="grid md:grid-cols-2 gap-4 w-full">
               {(["Array 1", "Array 2"] as const).map((label, idx) => {
                 const length = idx === 0 ? results.length1 : results.length2;
@@ -497,16 +503,13 @@ export default function ArrayDiffChecker() {
               })}
             </div>
 
-            {/* ── Duplicates ── */}
             <DuplicatesAlert label="Array 1" duplicates={results.duplicates1} />
             <DuplicatesAlert label="Array 2" duplicates={results.duplicates2} />
 
-            {/* ── Diff section (only when not identical) ── */}
             {!results.areIdentical && (
               <>
                 <Separator className="bg-slate-800" />
 
-                {/* Summary bar */}
                 <div className="flex gap-3 text-xs font-bold font-mono flex-wrap">
                   <span className="text-amber-400">{diff.changed.length} modificate</span>
                   <Separator orientation="vertical" className="h-4 bg-slate-700" />
@@ -517,7 +520,6 @@ export default function ArrayDiffChecker() {
                   <span className="text-slate-500">{diff.same.length} identice</span>
                 </div>
 
-                {/* Tabs */}
                 <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
                   <TabsList className="border h-auto p-1 gap-0.5 w-full flex justify-start overflow-x-auto">
                     {tabs.map((tab) => (
@@ -535,7 +537,6 @@ export default function ArrayDiffChecker() {
                   </TabsList>
                 </Tabs>
 
-                {/* Copy button */}
                 <div className="flex justify-end w-full">
                   <Button
                     variant="ghost"
@@ -548,18 +549,14 @@ export default function ArrayDiffChecker() {
                   </Button>
                 </div>
 
-                {/* Diff rows */}
                 <div className="space-y-1.5 w-full">
                   {visibleItems.length === 0 ? (
-                    <p className="text-center text-sm py-10">
-                      Nicio diferență în această categorie.
-                    </p>
+                    <p className="text-center text-sm py-10">Nicio diferență în această categorie.</p>
                   ) : (
                     visibleItems.map((item, i) => <DiffRow key={i} {...item} />)
                   )}
                 </div>
 
-                {/* Show same toggle */}
                 {activeTab === "all" && diff.same.length > 0 && (
                   <Button
                     variant="ghost"
