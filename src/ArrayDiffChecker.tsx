@@ -9,7 +9,6 @@ import {
   Minus,
   Plus,
   RefreshCw,
-  ArrowUpDown,
 } from "lucide-react";
 import {
   Card,
@@ -70,33 +69,6 @@ interface AnalysisResults {
   areIdentical: boolean;
   sameUniqueElements: boolean;
   diff: DiffResult;
-  wasSorted: boolean;
-}
-
-// ─── Helpers ───────────────────────────────────────────────────────────────────
-
-function findDuplicates(arr: unknown[]): DuplicateEntry[] {
-  const counts: Record<string, number> = {};
-  for (const item of arr) {
-    const key = JSON.stringify(item);
-    counts[key] = (counts[key] ?? 0) + 1;
-  }
-  return Object.entries(counts)
-    .filter(([, count]) => count > 1)
-    .map(([item, count]) => ({ item: JSON.parse(item) as unknown, count }));
-}
-
-function arraysAreIdentical(a: unknown[], b: unknown[]): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((val, i) => JSON.stringify(val) === JSON.stringify(b[i]));
-}
-
-function sameUniqueSet(a: unknown[], b: unknown[]): boolean {
-  const setA = new Set(a.map((v) => JSON.stringify(v)));
-  const setB = new Set(b.map((v) => JSON.stringify(v)));
-  if (setA.size !== setB.size) return false;
-  for (const v of setA) if (!setB.has(v)) return false;
-  return true;
 }
 
 function safeParse(raw: string): unknown[] {
@@ -109,68 +81,137 @@ function isPlainObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+// ─── Sort & Canonicalize ───────────────────────────────────────────────────────
+
+// Collator with numeric: true so "00001" < "00010" < "2" sorts as 1, 2, 10
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 /**
- * Canonicalizează recursiv un element: sortează cheile obiectelor și
- * sub-array-urile, astfel încât comparația să fie stabilă indiferent
- * de ordinea originală.
+ * Produces a stable sort key for any value.
+ * Objects: keys sorted alphabetically, values canonicalized recursively.
+ * Arrays: elements canonicalized and sorted (for key generation only).
+ * Primitives: returned as-is.
  */
-// Natural sort comparator — handles numbers, zero-padded strings, mixed content
-const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-
-function naturalCompare(a: unknown, b: unknown): number {
-  const sa = JSON.stringify(canonicalize(a)) ?? '';
-  const sb = JSON.stringify(canonicalize(b)) ?? '';
-  return collator.compare(sa, sb);
-}
-
 function canonicalize(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
   if (Array.isArray(value)) {
-    const mapped = value.map(canonicalize);
-    return mapped.sort((a, b) => naturalCompare(a, b));
+    return [...value].map(canonicalize).sort((a, b) =>
+      collator.compare(JSON.stringify(a) ?? "", JSON.stringify(b) ?? "")
+    );
   }
   if (isPlainObj(value)) {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      sorted[key] = canonicalize(value[key]);
-    }
-    return sorted;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(value).sort()) out[k] = canonicalize(value[k]);
+    return out;
   }
   return value;
 }
 
-/**
- * Sortează elementele unui array după cheia canonică, dar păstrează valorile originale.
- * canonicalize() e folosit DOAR ca cheie de sortare, nu modifică datele efective.
- */
-function sortArray(arr: unknown[]): unknown[] {
-  return [...arr].sort((a, b) => naturalCompare(a, b));
+/** Stable sort key string for any value */
+function sortKey(v: unknown): string {
+  return JSON.stringify(canonicalize(v)) ?? "null";
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────────
+
+function findDuplicates(arr: unknown[]): DuplicateEntry[] {
+  const counts = new Map<string, { item: unknown; count: number }>();
+  for (const item of arr) {
+    const key = sortKey(item);
+    const existing = counts.get(key);
+    if (existing) existing.count++;
+    else counts.set(key, { item, count: 1 });
+  }
+  return [...counts.values()].filter((e) => e.count > 1);
+}
+
+function arraysAreIdentical(a: unknown[], b: unknown[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((val, i) => sortKey(val) === sortKey(b[i]));
+}
+
+function sameUniqueSet(a: unknown[], b: unknown[]): boolean {
+  const setA = new Set(a.map(sortKey));
+  const setB = new Set(b.map(sortKey));
+  if (setA.size !== setB.size) return false;
+  for (const v of setA) if (!setB.has(v)) return false;
+  return true;
+}
+
+/** Sort an array by natural/numeric sort key, preserving original element references */
+function sortArr(arr: unknown[]): unknown[] {
+  return [...arr].sort((a, b) => collator.compare(sortKey(a), sortKey(b)));
 }
 
 // ─── Deep Diff Engine ──────────────────────────────────────────────────────────
 
+/**
+ * Diffs two arrays using SET semantics (order-independent):
+ * - elements present in both → "same"
+ * - only in b → "added"
+ * - only in a → "removed"
+ * Matching is done by canonical sort key so {b:1,a:2} matches {a:2,b:1}.
+ */
+function diffArrays(a: unknown[], b: unknown[], path: string): DiffResult {
+  const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
+
+  // Build frequency maps keyed by canonical representation
+  const countA = new Map<string, { count: number; value: unknown }>();
+  const countB = new Map<string, { count: number; value: unknown }>();
+
+  for (const v of a) {
+    const k = sortKey(v);
+    const existing = countA.get(k);
+    if (existing) existing.count++;
+    else countA.set(k, { count: 1, value: v });
+  }
+  for (const v of b) {
+    const k = sortKey(v);
+    const existing = countB.get(k);
+    if (existing) existing.count++;
+    else countB.set(k, { count: 1, value: v });
+  }
+
+  // Elements in both
+  for (const [k, entA] of countA) {
+    const entB = countB.get(k);
+    if (entB) {
+      const sameCount = Math.min(entA.count, entB.count);
+      for (let i = 0; i < sameCount; i++)
+        diffs.same.push({ path: `${path}[=${k.slice(0, 20)}]`, value: entA.value });
+      if (entA.count > entB.count) {
+        for (let i = 0; i < entA.count - entB.count; i++)
+          diffs.removed.push({ path: `${path}[-]`, value: entA.value });
+      } else if (entB.count > entA.count) {
+        for (let i = 0; i < entB.count - entA.count; i++)
+          diffs.added.push({ path: `${path}[+]`, value: entB.value });
+      }
+    } else {
+      for (let i = 0; i < entA.count; i++)
+        diffs.removed.push({ path: `${path}[-]`, value: entA.value });
+    }
+  }
+
+  // Elements only in b
+  for (const [k, entB] of countB) {
+    if (!countA.has(k)) {
+      for (let i = 0; i < entB.count; i++)
+        diffs.added.push({ path: `${path}[+]`, value: entB.value });
+    }
+  }
+
+  return diffs;
+}
+
 function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
 
+  // Both arrays → set-based diff (order-independent)
   if (Array.isArray(a) && Array.isArray(b)) {
-    // Sort nested arrays by canonical key before comparing position-by-position
-    const sortedA = path === '' ? a : sortArray(a);
-    const sortedB = path === '' ? b : sortArray(b);
-    const len = Math.max(sortedA.length, sortedB.length);
-    for (let i = 0; i < len; i++) {
-      const p = `${path}[${i}]`;
-      if (i >= sortedA.length) diffs.added.push({ path: p, value: sortedB[i] });
-      else if (i >= sortedB.length) diffs.removed.push({ path: p, value: sortedA[i] });
-      else {
-        const n = deepDiff(sortedA[i], sortedB[i], p);
-        diffs.added.push(...n.added);
-        diffs.removed.push(...n.removed);
-        diffs.changed.push(...n.changed);
-        diffs.same.push(...n.same);
-      }
-    }
-    return diffs;
+    return diffArrays(a, b, path);
   }
 
+  // Both objects → recurse per key
   if (isPlainObj(a) && isPlainObj(b)) {
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
     for (const key of keys) {
@@ -188,12 +229,16 @@ function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
     return diffs;
   }
 
-  if (JSON.stringify(canonicalize(a)) !== JSON.stringify(canonicalize(b)))
+  // Primitives / mixed types — compare by canonical key
+  if (sortKey(a) !== sortKey(b))
     diffs.changed.push({ path: path || "(root)", from: a, to: b });
-  else diffs.same.push({ path: path || "(root)", value: a });
+  else
+    diffs.same.push({ path: path || "(root)", value: a });
 
   return diffs;
 }
+
+// ─── UI Helpers
 
 // ─── UI Helpers ────────────────────────────────────────────────────────────────
 
@@ -311,20 +356,12 @@ export default function ArrayDiffChecker() {
     setError(null);
     setResults(null);
     try {
-      const arr1Raw = safeParse(array1);
-      const arr2Raw = safeParse(array2);
+      const arr1 = safeParse(array1);
+      const arr2 = safeParse(array2);
 
-      // Sort both arrays canonically before diffing
-      const arr1 = sortArray(arr1Raw);
-      const arr2 = sortArray(arr2Raw);
-
-      // Detect if either array's order changed after sorting
-      const wasSorted =
-        !arraysAreIdentical(arr1Raw, arr1) ||
-        !arraysAreIdentical(arr2Raw, arr2);
-
-      const set1 = new Set(arr1.map((v) => JSON.stringify(v)));
-      const set2 = new Set(arr2.map((v) => JSON.stringify(v)));
+      // Use canonical sort keys for set/identity checks (order-independent)
+      const set1 = new Set(arr1.map(sortKey));
+      const set2 = new Set(arr2.map(sortKey));
 
       setResults({
         length1: arr1.length,
@@ -336,7 +373,6 @@ export default function ArrayDiffChecker() {
         areIdentical: arraysAreIdentical(arr1, arr2),
         sameUniqueElements: sameUniqueSet(arr1, arr2),
         diff: deepDiff(arr1, arr2),
-        wasSorted,
       });
       setActiveTab("all");
       setShowSame(false);
@@ -466,19 +502,6 @@ export default function ArrayDiffChecker() {
         {/* Results */}
         {results && diff && (
           <CardFooter className="space-y-4 flex flex-col items-stretch p-0">
-
-            {/* ── Sort notice (shown only when order was actually changed) ── */}
-            {results.wasSorted && (
-              <Alert className="bg-sky-950/40 border-sky-500/30">
-                <ArrowUpDown className="h-4 w-4 text-sky-400" />
-                <AlertTitle className="text-sky-400 font-bold">
-                  Array-urile au fost sortate automat
-                </AlertTitle>
-                <AlertDescription className="text-slate-400">
-                  Ordinea originală a fost normalizată înainte de comparare — diferențele reflectă valorile, nu poziția lor.
-                </AlertDescription>
-              </Alert>
-            )}
 
             {/* ── Equality verdict ── */}
             {results.areIdentical ? (
