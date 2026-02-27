@@ -114,12 +114,12 @@ function revive(v: unknown): unknown {
 
 function safeParse(raw: string): unknown[] {
   const trimmed = raw.trim();
-  if (!trimmed) throw new Error("Input gol.");
+  if (!trimmed) throw new Error("Empty input.");
 
   // First try strict JSON
   try {
     const p = JSON.parse(trimmed);
-    if (!Array.isArray(p)) throw new Error("Input-ul nu este un array JSON valid.");
+    if (!Array.isArray(p)) throw new Error("Input is not a valid JSON array.");
     return p as unknown[];
   } catch (_) { }
 
@@ -127,7 +127,7 @@ function safeParse(raw: string): unknown[] {
   try {
     const preprocessed = preprocessJS(trimmed);
     const p = JSON.parse(preprocessed);
-    if (!Array.isArray(p)) throw new Error("Input-ul nu este un array.");
+    if (!Array.isArray(p)) throw new Error("Input is not an array.");
     return revive(p) as unknown[];
   } catch (_) { }
 
@@ -135,10 +135,10 @@ function safeParse(raw: string): unknown[] {
   try {
     // eslint-disable-next-line no-new-func
     const val = Function('"use strict"; return (' + trimmed + ')')();
-    if (!Array.isArray(val)) throw new Error("Input-ul nu este un array.");
+    if (!Array.isArray(val)) throw new Error("Input is not an array.");
     return val as unknown[];
   } catch (e) {
-    throw new Error("Format invalid: " + (e as Error).message);
+    throw new Error("Invalid format: " + (e as Error).message);
   }
 }
 
@@ -202,85 +202,91 @@ function sameUniqueSet(a: unknown[], b: unknown[]): boolean {
 
 // ─── Deep Diff Engine ──────────────────────────────────────────────────────────
 
+function isPrimitive(v: unknown): boolean {
+  return v === null || v === undefined || typeof v !== "object";
+}
+
 /**
- * Hybrid array diff:
- * 1. Match elements by canonical key (order-independent, exact matches first).
- * 2. For unmatched complex values (objects/arrays), try to pair them up and
- *    recurse into them to surface fine-grained diffs instead of add/remove.
- * 3. Remaining unmatched → added / removed.
+ * Array diff:
+ * - Pure primitives → set-based (order-independent: "de" removed, "fr" added)
+ * - Complex/mixed   → align by structural similarity + id-key boost, then recurse
  */
 function diffArrays(a: unknown[], b: unknown[], path: string): DiffResult {
   const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
 
-  const usedA = new Set<number>();
+  if (a.every(isPrimitive) && b.every(isPrimitive)) {
+    // Set-based diff
+    const countA = new Map<string, { v: unknown; n: number }>();
+    const countB = new Map<string, { v: unknown; n: number }>();
+    for (const v of a) { const k = sortKey(v); const e = countA.get(k); e ? e.n++ : countA.set(k, { v, n: 1 }); }
+    for (const v of b) { const k = sortKey(v); const e = countB.get(k); e ? e.n++ : countB.set(k, { v, n: 1 }); }
+    let si = 0, ai = 0, ri = 0;
+    for (const [k, ea] of countA) {
+      const eb = countB.get(k);
+      const sameN = eb ? Math.min(ea.n, eb.n) : 0;
+      for (let i = 0; i < sameN; i++) diffs.same.push({ path: `${path}[${si++}]`, value: ea.v });
+      for (let i = sameN; i < ea.n; i++) diffs.removed.push({ path: `${path}[-${ri++}]`, value: ea.v });
+      if (eb) for (let i = sameN; i < eb.n; i++) diffs.added.push({ path: `${path}[+${ai++}]`, value: eb.v });
+    }
+    for (const [k, eb] of countB) {
+      if (!countA.has(k)) for (let i = 0; i < eb.n; i++) diffs.added.push({ path: `${path}[+${ai++}]`, value: eb.v });
+    }
+    return diffs;
+  }
+
+  // Complex: exact match first, then best-structural-match, then add/remove
   const usedB = new Set<number>();
 
-  // Pass 1: exact canonical matches
   for (let i = 0; i < a.length; i++) {
-    const ka = sortKey(a[i]);
+    const va = a[i];
+    const ka = sortKey(va);
+
+    // Exact match
+    let matchedJ = -1;
     for (let j = 0; j < b.length; j++) {
       if (usedB.has(j)) continue;
-      if (sortKey(b[j]) === ka) {
-        diffs.same.push({ path: `${path}[${i}]`, value: a[i] });
-        usedA.add(i);
-        usedB.add(j);
-        break;
-      }
+      if (sortKey(b[j]) === ka) { matchedJ = j; break; }
     }
-  }
+    if (matchedJ !== -1) {
+      usedB.add(matchedJ);
+      diffs.same.push({ path: `${path}[${i}]`, value: va });
+      continue;
+    }
 
-  // Pass 2: pair up unmatched complex values (obj↔obj or arr↔arr) and recurse
-  const unmatchedA = a.map((v, i) => i).filter(i => !usedA.has(i));
-  const unmatchedB = b.map((v, i) => i).filter(i => !usedB.has(i));
-
-  const pairedA = new Set<number>();
-  const pairedB = new Set<number>();
-
-  for (const ia of unmatchedA) {
-    const va = a[ia];
-    if (!isPlainObj(va) && !Array.isArray(va)) continue;
-    // Find best match in B: same type, fewest differences
-    let bestIb = -1;
-    let bestScore = Infinity;
-    for (const ib of unmatchedB) {
-      if (pairedB.has(ib)) continue;
-      const vb = b[ib];
-      const sameType =
-        (isPlainObj(va) && isPlainObj(vb)) ||
-        (Array.isArray(va) && Array.isArray(vb));
+    // Best structural match
+    let bestJ = -1, bestScore = -1;
+    for (let j = 0; j < b.length; j++) {
+      if (usedB.has(j)) continue;
+      const vb = b[j];
+      const sameType = (isPlainObj(va) && isPlainObj(vb)) || (Array.isArray(va) && Array.isArray(vb));
       if (!sameType) continue;
-      // Simple similarity heuristic: count of matching top-level keys or elements
       let score = 0;
       if (isPlainObj(va) && isPlainObj(vb)) {
-        const keysA = Object.keys(va);
+        const keysA = new Set(Object.keys(va));
         const keysB = new Set(Object.keys(vb));
-        score = keysA.filter(k => !keysB.has(k)).length + [...keysB].filter(k => !keysA.includes(k)).length;
+        for (const k of keysA) if (keysB.has(k)) score++;
+        for (const idKey of ["id", "key", "name", "type"]) {
+          if (keysA.has(idKey) && keysB.has(idKey) && sortKey(va[idKey]) === sortKey((vb as Record<string, unknown>)[idKey])) score += 10;
+        }
       } else if (Array.isArray(va) && Array.isArray(vb)) {
-        score = Math.abs(va.length - vb.length);
+        const minLen = Math.min(va.length, vb.length);
+        for (let k = 0; k < minLen; k++) if (sortKey(va[k]) === sortKey(vb[k])) score++;
       }
-      if (score < bestScore) { bestScore = score; bestIb = ib; }
+      if (score > bestScore) { bestScore = score; bestJ = j; }
     }
-    if (bestIb !== -1) {
-      pairedA.add(ia);
-      pairedB.add(bestIb);
-      const n = deepDiff(va, b[bestIb], `${path}[${ia}]`);
-      diffs.added.push(...n.added);
-      diffs.removed.push(...n.removed);
-      diffs.changed.push(...n.changed);
-      diffs.same.push(...n.same);
+
+    if (bestJ !== -1) {
+      usedB.add(bestJ);
+      const n = deepDiff(va, b[bestJ], `${path}[${i}]`);
+      diffs.added.push(...n.added); diffs.removed.push(...n.removed);
+      diffs.changed.push(...n.changed); diffs.same.push(...n.same);
+    } else {
+      diffs.removed.push({ path: `${path}[${i}]`, value: va });
     }
   }
-
-  // Pass 3: remaining unmatched → removed / added
-  for (const ia of unmatchedA) {
-    if (!pairedA.has(ia))
-      diffs.removed.push({ path: `${path}[${ia}]`, value: a[ia] });
+  for (let j = 0; j < b.length; j++) {
+    if (!usedB.has(j)) diffs.added.push({ path: `${path}[${j}]`, value: b[j] });
   }
-  for (const ib of unmatchedB) {
-    if (!pairedB.has(ib))
-      diffs.added.push({ path: `${path}[${ib}]`, value: b[ib] });
-  }
-
   return diffs;
 }
 
@@ -340,28 +346,28 @@ function DiffRow({ type, path, from, to, value }: DiffItem) {
       bg: "bg-emerald-950/60",
       border: "border-emerald-500/40",
       icon: <Plus size={11} className="text-emerald-400" />,
-      label: "ADĂUGAT",
+      label: "ADDED",
       badge: "bg-emerald-950 text-emerald-400 border-emerald-700",
     },
     removed: {
       bg: "bg-red-950/60",
       border: "border-red-500/40",
       icon: <Minus size={11} className="text-red-400" />,
-      label: "ELIMINAT",
-      badge: "bg-red-950 text-red-400 border-red-700",
+      label: "REMOVED",
+      badge: "bg-red-550 text-red-400 border-red-700",
     },
     changed: {
       bg: "bg-amber-950/60",
       border: "border-amber-500/40",
       icon: <RefreshCw size={11} className="text-amber-400" />,
-      label: "MODIFICAT",
+      label: "CHANGED",
       badge: "bg-amber-950 text-amber-400 border-amber-700",
     },
     same: {
       bg: "bg-slate-900/40",
       border: "border-slate-700/30",
       icon: <span className="w-2.5 h-0.5 bg-slate-600 rounded-full inline-block" />,
-      label: "IDENTIC",
+      label: "SAME",
       badge: "bg-slate-900 text-slate-500 border-slate-700",
     },
   }[type];
@@ -399,7 +405,7 @@ function DuplicatesAlert({ label, duplicates }: { label: string; duplicates: Dup
   return (
     <Alert variant="destructive" className="bg-red-950/40 border-red-500/30 text-red-300 w-full">
       <AlertCircle className="h-4 w-4" />
-      <AlertTitle className="font-bold">Duplicate în {label}</AlertTitle>
+      <AlertTitle className="font-bold">Duplicates in {label}</AlertTitle>
       <AlertDescription>
         <div className="mt-2 space-y-1.5">
           {duplicates.map((dup, idx) => (
@@ -407,7 +413,7 @@ function DuplicatesAlert({ label, duplicates }: { label: string; duplicates: Dup
               <Badge variant="outline" className="font-mono border-red-500/40 text-red-300">
                 {JSON.stringify(dup.item)}
               </Badge>
-              <span className="text-xs text-red-400/70">apare de {dup.count} ori</span>
+              <span className="text-xs text-red-400/70">appears {dup.count} times</span>
             </p>
           ))}
         </div>
@@ -426,10 +432,10 @@ export default function ArrayDiffChecker() {
   const [activeTab, setActiveTab] = useState<string>("all");
   const [showSame, setShowSame] = useState<boolean>(false);
 
-  /** Detectează ghilimele simple în afara string-urilor deja cu ghilimele duble */
+  /** Detect single quotes outside already double-quoted strings */
   const hasSingleQuotes = useCallback((val: string) => /(?<![\\])'/.test(val), []);
 
-  /** Înlocuiește ghilimelele simple cu duble, grijă la cele escape-uite */
+  /** Replace single quotes with double quotes, skip escaped ones */
   const replaceSingleQuotes = useCallback((val: string) => val.replace(/(?<!\\)'/g, '"'), []);
 
   const analyzeArrays = useCallback(() => {
@@ -470,11 +476,11 @@ export default function ArrayDiffChecker() {
 
   const tabs: TabConfig[] = diff
     ? [
-      { id: "all", label: "Toate", count: diff.added.length + diff.removed.length + diff.changed.length },
-      { id: "changed", label: "Modificate", count: diff.changed.length },
-      { id: "added", label: "Adăugate", count: diff.added.length },
-      { id: "removed", label: "Eliminate", count: diff.removed.length },
-      { id: "same", label: "Identice", count: diff.same.length },
+      { id: "all", label: "All", count: diff.added.length + diff.removed.length + diff.changed.length },
+      { id: "changed", label: "Changed", count: diff.changed.length },
+      { id: "added", label: "Added", count: diff.added.length },
+      { id: "removed", label: "Removed", count: diff.removed.length },
+      { id: "same", label: "Same", count: diff.same.length },
     ]
     : [];
 
@@ -506,7 +512,7 @@ export default function ArrayDiffChecker() {
             <span className="text-slate-600">()</span>
           </h1>
           <CardDescription className="text-[1rem] mt-0.5">
-            Compară două array-uri JSON — duplicate, elemente unice, egalitate
+            Compare two JSON arrays — duplicates, unique elements, equality
           </CardDescription>
         </CardTitle>
       </CardHeader>
@@ -538,11 +544,11 @@ export default function ArrayDiffChecker() {
                         )}
                       >
                         <span className="font-mono text-xs">'→"</span>
-                        <span className="ml-0.5">ÎNLOCUIEȘTE</span>
+                        <span className="ml-0.5">REPLACE</span>
                       </button>
                     )}
                   </div>
-                  <CardDescription>Array JSON valid</CardDescription>
+                  <CardDescription>Valid JSON array</CardDescription>
                 </CardHeader>
                 <CardContent className="px-3 pb-3">
                   <div className={cn("rounded-lg border transition-colors", accent)}>
@@ -567,14 +573,14 @@ export default function ArrayDiffChecker() {
           disabled={!array1.trim() || !array2.trim()}
           className="w-full py-6 text-sm tracking-widest rounded-xl transition-all"
         >
-          ANALIZEAZĂ DIFERENȚELE
+          ANALYZE DIFFERENCES
         </Button>
 
         {/* Error */}
         {error && (
           <Alert variant="destructive" className="bg-red-950/60 border-red-500/40 text-red-400">
             <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Eroare de parsare</AlertTitle>
+            <AlertTitle>Parse error</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
@@ -587,23 +593,23 @@ export default function ArrayDiffChecker() {
             {results.areIdentical ? (
               <Alert className="bg-emerald-950/40 border-emerald-500/30">
                 <CheckCircle className="h-4 w-4 text-emerald-400" />
-                <AlertTitle className="text-emerald-400 font-bold">Array-urile sunt identice ✓</AlertTitle>
+                <AlertTitle className="text-emerald-400 font-bold">Arrays are identical ✓</AlertTitle>
                 <AlertDescription className="text-slate-400">
-                  {results.length1} elemente — aceleași valori.
+                  {results.length1} elements — same values.
                 </AlertDescription>
               </Alert>
             ) : results.sameUniqueElements ? (
               <Alert className="bg-amber-950/40 border-amber-500/30">
                 <Equal className="h-4 w-4 text-amber-400" />
-                <AlertTitle className="text-amber-400 font-bold">Aceleași elemente unice, dar nu identice</AlertTitle>
-                <AlertDescription className="text-slate-400">Diferă prin numărul de duplicate.</AlertDescription>
+                <AlertTitle className="text-amber-400 font-bold">Same unique elements, but not identical</AlertTitle>
+                <AlertDescription className="text-slate-400">Differ by number of duplicates.</AlertDescription>
               </Alert>
             ) : (
               <Alert className="bg-red-950/40 border-red-500/30">
                 <AlertCircle className="h-4 w-4 text-red-400" />
-                <AlertTitle className="text-red-400 font-bold">Array-urile sunt diferite</AlertTitle>
-                <AlertDescription className="text-slate-400">
-                  Există elemente prezente în unul dar nu în celălalt.
+                <AlertTitle className="text-red-400 font-bold">Arrays are different</AlertTitle>
+                <AlertDescription className="text-secondary-foreground">
+                  Elements present in one but not the other.
                 </AlertDescription>
               </Alert>
             )}
@@ -623,11 +629,11 @@ export default function ArrayDiffChecker() {
                     </CardHeader>
                     <CardContent className="px-4 pb-3 space-y-2">
                       <div className="flex justify-between items-center">
-                        <span className="text-xs text-slate-400">Lungime totală</span>
+                        <span className="text-xs text-slate-400">Total length</span>
                         <Badge variant="default" className="font-mono">{length}</Badge>
                       </div>
                       <div className="flex justify-between items-center">
-                        <span className="text-xs text-slate-400">Elemente unice</span>
+                        <span className="text-xs text-slate-400">Unique elements</span>
                         <Badge variant="secondary" className="font-mono">{unique}</Badge>
                       </div>
                     </CardContent>
@@ -646,13 +652,13 @@ export default function ArrayDiffChecker() {
                 <Separator className="bg-slate-800" />
 
                 <div className="flex gap-3 text-xs font-bold font-mono flex-wrap">
-                  <span className="text-amber-400">{diff.changed.length} modificate</span>
+                  <span className="text-amber-400">{diff.changed.length} changed</span>
                   <Separator orientation="vertical" className="h-4 bg-slate-700" />
-                  <span className="text-emerald-400">{diff.added.length} adăugate</span>
+                  <span className="text-emerald-400">{diff.added.length} added</span>
                   <Separator orientation="vertical" className="h-4 bg-slate-700" />
-                  <span className="text-red-400">{diff.removed.length} eliminate</span>
+                  <span className="text-red-400">{diff.removed.length} removed</span>
                   <Separator orientation="vertical" className="h-4 bg-slate-700" />
-                  <span className="text-slate-500">{diff.same.length} identice</span>
+                  <span className="text-slate-500">{diff.same.length} same</span>
                 </div>
 
                 <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
@@ -680,13 +686,13 @@ export default function ArrayDiffChecker() {
                     className="h-7 px-3 text-xs gap-1.5"
                   >
                     <Copy size={11} />
-                    Copiază rezultatele
+                    Copy results
                   </Button>
                 </div>
 
                 <div className="space-y-1.5 w-full">
                   {visibleItems.length === 0 ? (
-                    <p className="text-center text-sm py-10">Nicio diferență în această categorie.</p>
+                    <p className="text-center text-sm py-10">No differences in this category.</p>
                   ) : (
                     visibleItems.map((item, i) => <DiffRow key={i} {...item} />)
                   )}
@@ -700,7 +706,7 @@ export default function ArrayDiffChecker() {
                     className="flex items-center gap-2 text-xs mx-auto"
                   >
                     {showSame ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                    {showSame ? "Ascunde" : "Arată"} {diff.same.length} elemente identice
+                    {showSame ? "Hide" : "Show"} {diff.same.length} identical elements
                   </Button>
                 )}
               </>

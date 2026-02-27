@@ -66,7 +66,7 @@ interface TabConfig {
 
 function smartParse(str: string): ParseResult {
   const trimmed = str.trim();
-  if (!trimmed) throw new Error("Input gol");
+  if (!trimmed) throw new Error("Empty input");
 
   try {
     return { value: JSON.parse(trimmed), format: "json" };
@@ -88,10 +88,10 @@ function smartParse(str: string): ParseResult {
     if (typeof val === "object" && val !== null) {
       return { value: val, format: "js-eval", fixed: JSON.stringify(val, null, 2) };
     }
-    throw new Error("Nu este un obiect");
+    throw new Error("Not an object");
   } catch (e) {
     throw new Error(
-      "Nu am putut parsa inputul nici ca JSON, nici ca obiect JS: " +
+      "Could not parse input as JSON or JS object: " +
       (e as Error).message
     );
   }
@@ -110,12 +110,12 @@ function getParseStatus(str: string): ParseStatus | null {
   if (!str.trim()) return null;
   try {
     const result = smartParse(str);
-    if (result.format === "json") return { ok: true, label: "JSON valid", note: null };
+    if (result.format === "json") return { ok: true, label: "Valid JSON", note: null };
     if (result.format === "js" || result.format === "js-eval")
-      return { ok: true, label: "JS detectat", note: "Convertit automat" };
+      return { ok: true, label: "JS detected", note: "Auto-converted" };
     return null;
   } catch (e) {
-    return { ok: false, label: "Format invalid", note: (e as Error).message };
+    return { ok: false, label: "Invalid format", note: (e as Error).message };
   }
 }
 
@@ -350,28 +350,28 @@ function DiffRow({ type, path, from, to, value }: DiffRowProps) {
       bg: "bg-emerald-950/60",
       border: "border-emerald-500/40",
       icon: <Plus size={11} className="text-emerald-400" />,
-      label: "ADĂUGAT",
+      label: "ADDED",
       badge: "bg-emerald-950 text-emerald-400 border-emerald-700",
     },
     removed: {
       bg: "bg-red-950/60",
       border: "border-red-500/40",
       icon: <Minus size={11} className="text-red-400" />,
-      label: "ELIMINAT",
-      badge: "bg-red-950 border-red-700",
+      label: "REMOVED",
+      badge: "bg-red-550 border-red-700",
     },
     changed: {
       bg: "bg-amber-950/60",
       border: "border-amber-500/40",
       icon: <RefreshCw size={11} className="text-amber-400" />,
-      label: "MODIFICAT",
+      label: "CHANGED",
       badge: "bg-amber-950 text-amber-400 border-amber-700",
     },
     same: {
       bg: "bg-slate-900/40",
       border: "border-slate-700/30",
       icon: <span className="w-2.5 h-0.5 bg-slate-600 rounded-full inline-block" />,
-      label: "IDENTIC",
+      label: "SAME",
       badge: "bg-slate-900 text-slate-500 border-slate-700",
     },
   }[type];
@@ -527,9 +527,9 @@ export default function ObjectDiffChecker() {
       const { value: o1raw } = smartParse(raw1);
       const { value: o2raw } = smartParse(raw2);
       if (!isPlainObj(o1raw) && !Array.isArray(o1raw))
-        throw new Error("Obiect A nu este un obiect sau array valid");
+        throw new Error("Object A is not a valid object or array");
       if (!isPlainObj(o2raw) && !Array.isArray(o2raw))
-        throw new Error("Obiect B nu este un obiect sau array valid");
+        throw new Error("Object B is not a valid object or array");
 
       // Sort arrays deeply inside both values before diffing
       const { sorted: o1, changed: changed1 } = normalizeKeyOrder(o1raw);
@@ -560,13 +560,13 @@ export default function ObjectDiffChecker() {
     ? [
       {
         id: "all",
-        label: "Toate",
+        label: "All",
         count: results.added.length + results.removed.length + results.changed.length,
       },
-      { id: "changed", label: "Modificate", count: results.changed.length },
-      { id: "added", label: "Adăugate", count: results.added.length },
-      { id: "removed", label: "Eliminate", count: results.removed.length },
-      { id: "same", label: "Identice", count: results.same.length },
+      { id: "changed", label: "Changed", count: results.changed.length },
+      { id: "added", label: "Added", count: results.added.length },
+      { id: "removed", label: "Removed", count: results.removed.length },
+      { id: "same", label: "Same", count: results.same.length },
     ]
     : [];
 
@@ -602,17 +602,17 @@ export default function ObjectDiffChecker() {
           </h1>
           <CardDescription className="text-[1rem] mt-0.5">
             <div className="my-4">
-              Compară două obiecte/array-uri JSON — proprietăți, valori, egalitate
+              Compare two JSON objects/arrays — properties, values, equality
             </div>
             <div className="flex flex-wrap gap-3 px-1">
-              <span className="font-bold">Formate acceptate:</span>
+              <span className="font-bold">Accepted formats:</span>
               <span>JSON standard <span>{'{ "key": "val" }'}</span></span>
               <span>•</span>
               <span>JS object <span>{"{ key: 'val' }"}</span></span>
               <span>•</span>
-              <span>Ghilimele simple <span>{"'val'"}</span></span>
+              <span>Single quotes <span>{"'val'"}</span></span>
               <span>•</span>
-              <span>Chei fără ghilimele</span>
+              <span>Unquoted keys</span>
             </div>
           </CardDescription>
         </CardTitle>
@@ -622,14 +622,14 @@ export default function ObjectDiffChecker() {
         {/* Input panels */}
         <div className="grid md:grid-cols-2 gap-4">
           <InputPanel
-            label="Obiect A"
+            label="Object A"
             accent="cyan"
             raw={raw1}
             setRaw={(v) => { setRaw1(v); setResults(null); }}
             status={status1}
           />
           <InputPanel
-            label="Obiect B"
+            label="Object B"
             accent="violet"
             raw={raw2}
             setRaw={(v) => { setRaw2(v); setResults(null); }}
@@ -643,7 +643,7 @@ export default function ObjectDiffChecker() {
           disabled={!raw1.trim() || !raw2.trim()}
           className="w-full py-6 text-sm tracking-widest rounded-xl transition-all duration-200 hover:shadow-lg hover:shadow-cyan-500/20"
         >
-          ANALIZEAZĂ DIFERENȚELE
+          ANALYZE DIFFERENCES
         </Button>
 
         {/* Parse error */}
@@ -661,11 +661,11 @@ export default function ObjectDiffChecker() {
             {/* Sort notice */}
             {wasSorted && (
               <Alert className="bg-sky-950/40 border-sky-500/30">
-                <ArrowUpDown className="h-4 w-4 text-sky-400" />
+                <ArrowUpDown className="h-4 w-4 text-sky-300" />
                 <AlertDescription>
-                  <span className="text-sky-400 font-bold block">Array-urile au fost sortate automat</span>
-                  <span className="text-slate-400 text-xs">
-                    Cheile obiectelor și elementele array-urilor au fost sortate alfabetic/canonic în ambele structuri — diferențele reflectă valorile reale, nu ordinea lor.
+                  <span className="text-sky-100 font-bold block">Arrays were automatically sorted</span>
+                  <span className="text-secondary-foreground text-xs">
+                    Object keys were normalized alphabetically in both structures — differences reflect actual values, not key order.
                   </span>
                 </AlertDescription>
               </Alert>
@@ -673,13 +673,13 @@ export default function ObjectDiffChecker() {
 
             {results && !isIdentical && (
               <div className="flex gap-3 text-xs font-bold font-mono">
-                <span className="text-amber-400">{results.changed.length} modificate</span>
+                <span className="text-amber-400">{results.changed.length} changed</span>
                 <Separator orientation="vertical" className="h-4 bg-slate-700" />
-                <span className="text-emerald-400">{results.added.length} adăugate</span>
+                <span className="text-emerald-400">{results.added.length} added</span>
                 <Separator orientation="vertical" className="h-4 bg-slate-700" />
-                <span className="text-red-400">{results.removed.length} eliminate</span>
+                <span className="text-red-400">{results.removed.length} removed</span>
                 <Separator orientation="vertical" className="h-4 bg-slate-700" />
-                <span className="text-slate-500">{results.same.length} identice</span>
+                <span className="text-slate-500">{results.same.length} same</span>
               </div>
             )}
 
@@ -687,9 +687,9 @@ export default function ObjectDiffChecker() {
               <Alert className="bg-emerald-950/40 border-emerald-500/30 text-emerald-400">
                 <CheckCircle className="h-4 w-4" />
                 <AlertDescription>
-                  <span className="font-bold block">Obiectele sunt identice ✓</span>
+                  <span className="font-bold block">Objects are identical ✓</span>
                   <span className="text-xs text-slate-400">
-                    {results.same.length} proprietăți comparate — nicio diferență
+                    {results.same.length} properties compared — no differences
                   </span>
                 </AlertDescription>
               </Alert>
@@ -720,14 +720,14 @@ export default function ObjectDiffChecker() {
                     className="h-7 px-3 text-xs gap-1.5"
                   >
                     <Copy size={11} />
-                    Copiază rezultatele
+                    Copy results
                   </Button>
                 </div>
 
                 <div className="space-y-1.5">
                   {visibleItems.length === 0 ? (
                     <p className="text-center text-sm py-10">
-                      Nicio diferență în această categorie.
+                      No differences in this category.
                     </p>
                   ) : (
                     visibleItems.map((item, i) => <DiffRow key={i} {...item} />)
@@ -742,7 +742,7 @@ export default function ObjectDiffChecker() {
                     className="flex items-center gap-2 text-xs text-slate-500 hover:text-slate-300 mx-auto"
                   >
                     {showSame ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                    {showSame ? "Ascunde" : "Arată"} {results.same.length} proprietăți identice
+                    {showSame ? "Hide" : "Show"} {results.same.length} identical properties
                   </Button>
                 )}
               </>
