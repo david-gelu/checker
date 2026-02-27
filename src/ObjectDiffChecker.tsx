@@ -22,6 +22,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Separator } from "@/components/ui/separator";
 import { cn } from "./lib/utils";
 
+// ─── Types ─────────────────────────────────────────────────────────────────────
 
 interface ParseResult {
   value: unknown;
@@ -61,6 +62,7 @@ interface TabConfig {
   count: number;
 }
 
+// ─── Smart Parser ───────────────────────────────────────────────────────────────
 
 function smartParse(str: string): ParseResult {
   const trimmed = str.trim();
@@ -117,11 +119,16 @@ function getParseStatus(str: string): ParseStatus | null {
   }
 }
 
+// ─── Sort Helpers ──────────────────────────────────────────────────────────────
 
 function isPlainObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/**
+ * Canonicalizează recursiv: sortează cheile obiectelor și elementele
+ * array-urilor după reprezentarea JSON, pentru o comparație stabilă.
+ */
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
     const mapped = value.map(canonicalize);
@@ -141,6 +148,10 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Sortează recursiv toate array-urile dintr-un obiect/array.
+ * Returnează valoarea sortată + un flag care indică dacă ceva s-a schimbat.
+ */
 function sortDeep(value: unknown): { sorted: unknown; changed: boolean } {
   if (Array.isArray(value)) {
     const mappedResults = value.map(sortDeep);
@@ -157,6 +168,7 @@ function sortDeep(value: unknown): { sorted: unknown; changed: boolean } {
     return { sorted: sortedArr, changed: orderChanged };
   }
   if (isPlainObj(value)) {
+    // Sort keys alphabetically so objects with same keys in different order compare as equal
     const sortedKeys = Object.keys(value).sort();
     const originalKeys = Object.keys(value);
     const keyOrderChanged = sortedKeys.some((k, i) => k !== originalKeys[i]);
@@ -172,6 +184,7 @@ function sortDeep(value: unknown): { sorted: unknown; changed: boolean } {
   return { sorted: value, changed: false };
 }
 
+// ─── Deep Diff Engine ──────────────────────────────────────────────────────────
 
 function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
@@ -217,6 +230,7 @@ function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   return diffs;
 }
 
+// ─── UI Helpers ────────────────────────────────────────────────────────────────
 
 function ValueDisplay({ value }: { value: unknown }) {
   if (value === null) return <span className="italic">null</span>;
@@ -316,6 +330,7 @@ function DiffRow({ type, path, from, to, value }: DiffRowProps) {
   );
 }
 
+// ─── Input Panel ───────────────────────────────────────────────────────────────
 
 interface InputPanelProps {
   label: string;
@@ -389,6 +404,7 @@ function InputPanel({ label, accent, raw, setRaw, status }: InputPanelProps) {
           <Textarea
             value={raw}
             onChange={(e) => setRaw(e.target.value)}
+            onBlur={(e) => setRaw(e.target.value.trim())}
             className="h-56 border-0 bg-transparent text-sm font-mono resize-none focus-visible:ring-0 focus-visible:ring-offset-0 leading-relaxed"
             placeholder={'// JSON:\n{ "key": "value", "arr": [1, 2] }\n\n// sau JS:\n{ key: \'value\', arr: [1, 2] }'}
             spellCheck={false}
@@ -406,6 +422,7 @@ function InputPanel({ label, accent, raw, setRaw, status }: InputPanelProps) {
   );
 }
 
+// ─── Main Component ────────────────────────────────────────────────────────────
 
 export default function ObjectDiffChecker() {
   const [raw1, setRaw1] = useState<string>("");
@@ -430,6 +447,7 @@ export default function ObjectDiffChecker() {
       if (!isPlainObj(o2raw) && !Array.isArray(o2raw))
         throw new Error("Obiect B nu este un obiect sau array valid");
 
+      // Sort arrays deeply inside both values before diffing
       const { sorted: o1, changed: changed1 } = sortDeep(o1raw);
       const { sorted: o2, changed: changed2 } = sortDeep(o2raw);
       setWasSorted(changed1 || changed2);
@@ -535,6 +553,7 @@ export default function ObjectDiffChecker() {
           />
         </div>
 
+        {/* Analyze button */}
         <Button
           onClick={analyze}
           disabled={!raw1.trim() || !raw2.trim()}
@@ -543,6 +562,7 @@ export default function ObjectDiffChecker() {
           ANALIZEAZĂ DIFERENȚELE
         </Button>
 
+        {/* Parse error */}
         {parseError && (
           <Alert variant="destructive" className="bg-red-950/60 border-red-500/40 text-red-400">
             <AlertTriangle className="h-4 w-4" />
@@ -550,9 +570,11 @@ export default function ObjectDiffChecker() {
           </Alert>
         )}
 
+        {/* Results */}
         {results && (
           <CardFooter className="space-y-4 flex flex-col items-stretch justify-between">
 
+            {/* Sort notice */}
             {wasSorted && (
               <Alert className="bg-sky-950/40 border-sky-500/30">
                 <ArrowUpDown className="h-4 w-4 text-sky-400" />

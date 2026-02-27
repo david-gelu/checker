@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import {
   AlertCircle,
   CheckCircle,
@@ -27,6 +27,7 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
+// ─── Types ─────────────────────────────────────────────────────────────────────
 
 interface DuplicateEntry {
   item: unknown;
@@ -72,6 +73,7 @@ interface AnalysisResults {
   wasSorted: boolean;
 }
 
+// ─── Helpers ───────────────────────────────────────────────────────────────────
 
 function findDuplicates(arr: unknown[]): DuplicateEntry[] {
   const counts: Record<string, number> = {};
@@ -107,6 +109,11 @@ function isPlainObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/**
+ * Canonicalizează recursiv un element: sortează cheile obiectelor și
+ * sub-array-urile, astfel încât comparația să fie stabilă indiferent
+ * de ordinea originală.
+ */
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
     const mapped = value.map(canonicalize);
@@ -126,6 +133,7 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
+/** Sortează elementele de top-level ale unui array după reprezentarea JSON canonică. */
 function sortArray(arr: unknown[]): unknown[] {
   return arr.map(canonicalize).sort((a, b) => {
     const sa = JSON.stringify(a);
@@ -134,6 +142,7 @@ function sortArray(arr: unknown[]): unknown[] {
   });
 }
 
+// ─── Deep Diff Engine ──────────────────────────────────────────────────────────
 
 function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
@@ -179,6 +188,7 @@ function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   return diffs;
 }
 
+// ─── UI Helpers ────────────────────────────────────────────────────────────────
 
 function ValueDisplay({ value }: { value: unknown }) {
   if (value === null) return <span className="italic">null</span>;
@@ -250,6 +260,7 @@ function DiffRow({ type, path, from, to, value }: DiffItem) {
   );
 }
 
+// ─── Duplicates Alert ──────────────────────────────────────────────────────────
 
 function DuplicatesAlert({ label, duplicates }: { label: string; duplicates: DuplicateEntry[] }) {
   if (!duplicates.length) return null;
@@ -273,6 +284,7 @@ function DuplicatesAlert({ label, duplicates }: { label: string; duplicates: Dup
   );
 }
 
+// ─── Main Component ────────────────────────────────────────────────────────────
 
 export default function ArrayDiffChecker() {
   const [array1, setArray1] = useState<string>("");
@@ -282,8 +294,10 @@ export default function ArrayDiffChecker() {
   const [activeTab, setActiveTab] = useState<string>("all");
   const [showSame, setShowSame] = useState<boolean>(false);
 
+  /** Detectează ghilimele simple în afara string-urilor deja cu ghilimele duble */
   const hasSingleQuotes = useCallback((val: string) => /(?<![\\])'/.test(val), []);
 
+  /** Înlocuiește ghilimelele simple cu duble, grijă la cele escape-uite */
   const replaceSingleQuotes = useCallback((val: string) => val.replace(/(?<!\\)'/g, '"'), []);
 
   const analyzeArrays = useCallback(() => {
@@ -293,9 +307,11 @@ export default function ArrayDiffChecker() {
       const arr1Raw = safeParse(array1);
       const arr2Raw = safeParse(array2);
 
+      // Sort both arrays canonically before diffing
       const arr1 = sortArray(arr1Raw);
       const arr2 = sortArray(arr2Raw);
 
+      // Detect if either array's order changed after sorting
       const wasSorted =
         !arraysAreIdentical(arr1Raw, arr1) ||
         !arraysAreIdentical(arr2Raw, arr2);
@@ -373,6 +389,7 @@ export default function ArrayDiffChecker() {
       </CardHeader>
 
       <CardContent className="max-w-6xl mx-auto p-6 space-y-5">
+        {/* Input panels */}
         <div className="grid md:grid-cols-2 gap-4">
           {(["Array 1", "Array 2"] as const).map((label, idx) => {
             const value = idx === 0 ? array1 : array2;
@@ -409,6 +426,7 @@ export default function ArrayDiffChecker() {
                     <Textarea
                       value={value}
                       onChange={(e) => { setter(e.target.value); setResults(null); }}
+                      onBlur={(e) => { setter(e.target.value.trim()); }}
                       placeholder='["item1", "item2", "item3"]'
                       className="min-h-56 border-0 bg-transparent font-mono text-sm resize-none focus-visible:ring-0 focus-visible:ring-offset-0 leading-relaxed"
                       spellCheck={false}
@@ -420,6 +438,7 @@ export default function ArrayDiffChecker() {
           })}
         </div>
 
+        {/* Analyze button */}
         <Button
           onClick={analyzeArrays}
           disabled={!array1.trim() || !array2.trim()}
@@ -437,9 +456,11 @@ export default function ArrayDiffChecker() {
           </Alert>
         )}
 
+        {/* Results */}
         {results && diff && (
           <CardFooter className="space-y-4 flex flex-col items-stretch p-0">
 
+            {/* ── Sort notice (shown only when order was actually changed) ── */}
             {results.wasSorted && (
               <Alert className="bg-sky-950/40 border-sky-500/30">
                 <ArrowUpDown className="h-4 w-4 text-sky-400" />
@@ -452,6 +473,7 @@ export default function ArrayDiffChecker() {
               </Alert>
             )}
 
+            {/* ── Equality verdict ── */}
             {results.areIdentical ? (
               <Alert className="bg-emerald-950/40 border-emerald-500/30">
                 <CheckCircle className="h-4 w-4 text-emerald-400" />
@@ -478,6 +500,7 @@ export default function ArrayDiffChecker() {
 
             <Separator className="bg-slate-800" />
 
+            {/* ── Stats ── */}
             <div className="grid md:grid-cols-2 gap-4 w-full">
               {(["Array 1", "Array 2"] as const).map((label, idx) => {
                 const length = idx === 0 ? results.length1 : results.length2;
@@ -503,9 +526,11 @@ export default function ArrayDiffChecker() {
               })}
             </div>
 
+            {/* ── Duplicates ── */}
             <DuplicatesAlert label="Array 1" duplicates={results.duplicates1} />
             <DuplicatesAlert label="Array 2" duplicates={results.duplicates2} />
 
+            {/* ── Diff section (only when not identical) ── */}
             {!results.areIdentical && (
               <>
                 <Separator className="bg-slate-800" />
