@@ -71,45 +71,107 @@ interface AnalysisResults {
   diff: DiffResult;
 }
 
-function safeParse(raw: string): unknown[] {
-  const parsed: unknown = JSON.parse(raw.trim());
-  if (!Array.isArray(parsed)) throw new Error("Input-ul nu este un array JSON valid.");
-  return parsed as unknown[];
+// ─── Parser ────────────────────────────────────────────────────────────────────
+
+/**
+ * Tolerant parser: handles JSON + JS-like syntax (single quotes, unquoted keys,
+ * trailing commas, undefined, Infinity, -Infinity).
+ * undefined becomes the symbol UNDEFINED_SENTINEL so it survives JSON.stringify.
+ */
+const UNDEF = "__UNDEFINED__" as const;
+
+function preprocessJS(raw: string): string {
+  let s = raw.trim();
+  // undefined → sentinel string (we replace it back after parse)
+  s = s.replace(/:\s*undefined(?=\s*[,}\]])/g, ': "__UNDEFINED__"');
+  s = s.replace(/,\s*undefined(?=\s*[,\]])/g, ', "__UNDEFINED__"');
+  s = s.replace(/\[\s*undefined(?=\s*[,\]])/g, '["__UNDEFINED__"');
+  s = s.replace(/(?<=\[)\s*undefined(?=\s*\])/g, '"__UNDEFINED__"');
+  // single quotes → double quotes (naive but works for non-nested)
+  s = s.replace(/'/g, '"');
+  // unquoted keys
+  s = s.replace(/([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)(\s*:)/g, '$1"$2"$3');
+  // trailing commas
+  s = s.replace(/,(\s*[}\]])/g, '$1');
+  // Infinity
+  s = s.replace(/:\s*-Infinity/g, ': "-Infinity__"');
+  s = s.replace(/:\s*Infinity/g, ': "Infinity__"');
+  return s;
 }
+
+function revive(v: unknown): unknown {
+  if (v === UNDEF) return undefined;
+  if (Array.isArray(v)) return v.map(revive);
+  if (v !== null && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      out[k] = revive(val);
+    }
+    return out;
+  }
+  return v;
+}
+
+function safeParse(raw: string): unknown[] {
+  const trimmed = raw.trim();
+  if (!trimmed) throw new Error("Input gol.");
+
+  // First try strict JSON
+  try {
+    const p = JSON.parse(trimmed);
+    if (!Array.isArray(p)) throw new Error("Input-ul nu este un array JSON valid.");
+    return p as unknown[];
+  } catch (_) { }
+
+  // Then try preprocessed JS-like syntax
+  try {
+    const preprocessed = preprocessJS(trimmed);
+    const p = JSON.parse(preprocessed);
+    if (!Array.isArray(p)) throw new Error("Input-ul nu este un array.");
+    return revive(p) as unknown[];
+  } catch (_) { }
+
+  // Last resort: Function eval (handles complex JS objects)
+  try {
+    // eslint-disable-next-line no-new-func
+    const val = Function('"use strict"; return (' + trimmed + ')')();
+    if (!Array.isArray(val)) throw new Error("Input-ul nu este un array.");
+    return val as unknown[];
+  } catch (e) {
+    throw new Error("Format invalid: " + (e as Error).message);
+  }
+}
+
+// ─── Utilities ─────────────────────────────────────────────────────────────────
 
 function isPlainObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** Serialize any value to a stable string — handles undefined, NaN, Infinity */
+function stableStringify(v: unknown): string {
+  if (v === undefined) return "__undefined__";
+  if (v !== v) return "__NaN__"; // NaN check
+  if (v === Infinity) return "__Infinity__";
+  if (v === -Infinity) return "__-Infinity__";
+  if (Array.isArray(v)) return "[" + v.map(stableStringify).join(",") + "]";
+  if (v !== null && typeof v === "object") {
+    const keys = Object.keys(v as object).sort();
+    return "{" + keys.map(k => JSON.stringify(k) + ":" + stableStringify((v as Record<string, unknown>)[k])).join(",") + "}";
+  }
+  return JSON.stringify(v) ?? "null";
+}
+
 // ─── Sort & Canonicalize ───────────────────────────────────────────────────────
 
-// Collator with numeric: true so "00001" < "00010" < "2" sorts as 1, 2, 10
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 /**
- * Produces a stable sort key for any value.
- * Objects: keys sorted alphabetically, values canonicalized recursively.
- * Arrays: elements canonicalized and sorted (for key generation only).
- * Primitives: returned as-is.
+ * Stable sort key: objects get alphabetically-sorted keys, arrays get
+ * sorted elements — used ONLY for ordering, never modifies original data.
  */
-function canonicalize(value: unknown): unknown {
-  if (value === null || value === undefined) return value;
-  if (Array.isArray(value)) {
-    return [...value].map(canonicalize).sort((a, b) =>
-      collator.compare(JSON.stringify(a) ?? "", JSON.stringify(b) ?? "")
-    );
-  }
-  if (isPlainObj(value)) {
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(value).sort()) out[k] = canonicalize(value[k]);
-    return out;
-  }
-  return value;
-}
-
-/** Stable sort key string for any value */
 function sortKey(v: unknown): string {
-  return JSON.stringify(canonicalize(v)) ?? "null";
+  return stableStringify(v);
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -138,66 +200,85 @@ function sameUniqueSet(a: unknown[], b: unknown[]): boolean {
   return true;
 }
 
-/** Sort an array by natural/numeric sort key, preserving original element references */
-function sortArr(arr: unknown[]): unknown[] {
-  return [...arr].sort((a, b) => collator.compare(sortKey(a), sortKey(b)));
-}
-
 // ─── Deep Diff Engine ──────────────────────────────────────────────────────────
 
 /**
- * Diffs two arrays using SET semantics (order-independent):
- * - elements present in both → "same"
- * - only in b → "added"
- * - only in a → "removed"
- * Matching is done by canonical sort key so {b:1,a:2} matches {a:2,b:1}.
+ * Hybrid array diff:
+ * 1. Match elements by canonical key (order-independent, exact matches first).
+ * 2. For unmatched complex values (objects/arrays), try to pair them up and
+ *    recurse into them to surface fine-grained diffs instead of add/remove.
+ * 3. Remaining unmatched → added / removed.
  */
 function diffArrays(a: unknown[], b: unknown[], path: string): DiffResult {
   const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
 
-  // Build frequency maps keyed by canonical representation
-  const countA = new Map<string, { count: number; value: unknown }>();
-  const countB = new Map<string, { count: number; value: unknown }>();
+  const usedA = new Set<number>();
+  const usedB = new Set<number>();
 
-  for (const v of a) {
-    const k = sortKey(v);
-    const existing = countA.get(k);
-    if (existing) existing.count++;
-    else countA.set(k, { count: 1, value: v });
-  }
-  for (const v of b) {
-    const k = sortKey(v);
-    const existing = countB.get(k);
-    if (existing) existing.count++;
-    else countB.set(k, { count: 1, value: v });
-  }
-
-  // Elements in both
-  for (const [k, entA] of countA) {
-    const entB = countB.get(k);
-    if (entB) {
-      const sameCount = Math.min(entA.count, entB.count);
-      for (let i = 0; i < sameCount; i++)
-        diffs.same.push({ path: `${path}[=${k.slice(0, 20)}]`, value: entA.value });
-      if (entA.count > entB.count) {
-        for (let i = 0; i < entA.count - entB.count; i++)
-          diffs.removed.push({ path: `${path}[-]`, value: entA.value });
-      } else if (entB.count > entA.count) {
-        for (let i = 0; i < entB.count - entA.count; i++)
-          diffs.added.push({ path: `${path}[+]`, value: entB.value });
+  // Pass 1: exact canonical matches
+  for (let i = 0; i < a.length; i++) {
+    const ka = sortKey(a[i]);
+    for (let j = 0; j < b.length; j++) {
+      if (usedB.has(j)) continue;
+      if (sortKey(b[j]) === ka) {
+        diffs.same.push({ path: `${path}[${i}]`, value: a[i] });
+        usedA.add(i);
+        usedB.add(j);
+        break;
       }
-    } else {
-      for (let i = 0; i < entA.count; i++)
-        diffs.removed.push({ path: `${path}[-]`, value: entA.value });
     }
   }
 
-  // Elements only in b
-  for (const [k, entB] of countB) {
-    if (!countA.has(k)) {
-      for (let i = 0; i < entB.count; i++)
-        diffs.added.push({ path: `${path}[+]`, value: entB.value });
+  // Pass 2: pair up unmatched complex values (obj↔obj or arr↔arr) and recurse
+  const unmatchedA = a.map((v, i) => i).filter(i => !usedA.has(i));
+  const unmatchedB = b.map((v, i) => i).filter(i => !usedB.has(i));
+
+  const pairedA = new Set<number>();
+  const pairedB = new Set<number>();
+
+  for (const ia of unmatchedA) {
+    const va = a[ia];
+    if (!isPlainObj(va) && !Array.isArray(va)) continue;
+    // Find best match in B: same type, fewest differences
+    let bestIb = -1;
+    let bestScore = Infinity;
+    for (const ib of unmatchedB) {
+      if (pairedB.has(ib)) continue;
+      const vb = b[ib];
+      const sameType =
+        (isPlainObj(va) && isPlainObj(vb)) ||
+        (Array.isArray(va) && Array.isArray(vb));
+      if (!sameType) continue;
+      // Simple similarity heuristic: count of matching top-level keys or elements
+      let score = 0;
+      if (isPlainObj(va) && isPlainObj(vb)) {
+        const keysA = Object.keys(va);
+        const keysB = new Set(Object.keys(vb));
+        score = keysA.filter(k => !keysB.has(k)).length + [...keysB].filter(k => !keysA.includes(k)).length;
+      } else if (Array.isArray(va) && Array.isArray(vb)) {
+        score = Math.abs(va.length - vb.length);
+      }
+      if (score < bestScore) { bestScore = score; bestIb = ib; }
     }
+    if (bestIb !== -1) {
+      pairedA.add(ia);
+      pairedB.add(bestIb);
+      const n = deepDiff(va, b[bestIb], `${path}[${ia}]`);
+      diffs.added.push(...n.added);
+      diffs.removed.push(...n.removed);
+      diffs.changed.push(...n.changed);
+      diffs.same.push(...n.same);
+    }
+  }
+
+  // Pass 3: remaining unmatched → removed / added
+  for (const ia of unmatchedA) {
+    if (!pairedA.has(ia))
+      diffs.removed.push({ path: `${path}[${ia}]`, value: a[ia] });
+  }
+  for (const ib of unmatchedB) {
+    if (!pairedB.has(ib))
+      diffs.added.push({ path: `${path}[${ib}]`, value: b[ib] });
   }
 
   return diffs;
@@ -206,20 +287,20 @@ function diffArrays(a: unknown[], b: unknown[], path: string): DiffResult {
 function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
 
-  // Both arrays → set-based diff (order-independent)
   if (Array.isArray(a) && Array.isArray(b)) {
     return diffArrays(a, b, path);
   }
 
-  // Both objects → recurse per key
   if (isPlainObj(a) && isPlainObj(b)) {
-    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    const keys = new Set([...Object.keys(a as object), ...Object.keys(b as object)]);
     for (const key of keys) {
       const p = path ? `${path}.${key}` : key;
-      if (!(key in a)) diffs.added.push({ path: p, value: (b as Record<string, unknown>)[key] });
-      else if (!(key in b)) diffs.removed.push({ path: p, value: (a as Record<string, unknown>)[key] });
+      const av = (a as Record<string, unknown>)[key];
+      const bv = (b as Record<string, unknown>)[key];
+      if (!(key in (a as object))) diffs.added.push({ path: p, value: bv });
+      else if (!(key in (b as object))) diffs.removed.push({ path: p, value: av });
       else {
-        const n = deepDiff((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], p);
+        const n = deepDiff(av, bv, p);
         diffs.added.push(...n.added);
         diffs.removed.push(...n.removed);
         diffs.changed.push(...n.changed);
@@ -229,7 +310,6 @@ function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
     return diffs;
   }
 
-  // Primitives / mixed types — compare by canonical key
   if (sortKey(a) !== sortKey(b))
     diffs.changed.push({ path: path || "(root)", from: a, to: b });
   else

@@ -119,64 +119,55 @@ function getParseStatus(str: string): ParseStatus | null {
   }
 }
 
-// ─── Sort Helpers ──────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function isPlainObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 /**
- * Canonicalizează recursiv: sortează cheile obiectelor și elementele
- * array-urilor după reprezentarea JSON, pentru o comparație stabilă.
+ * Stable canonical key for any value — used ONLY for sorting/matching,
+ * never modifies original data. Object keys are alphabetically sorted so
+ * {b:1,a:2} and {a:2,b:1} produce the same key.
  */
-// Natural sort comparator — handles numbers, zero-padded strings, mixed content
-const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-
-function naturalCompare(a: unknown, b: unknown): number {
-  const sa = JSON.stringify(canonicalize(a)) ?? '';
-  const sb = JSON.stringify(canonicalize(b)) ?? '';
-  return collator.compare(sa, sb);
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    const mapped = value.map(canonicalize);
-    return mapped.sort((a, b) => naturalCompare(a, b));
+function stableKey(v: unknown): string {
+  if (v === undefined) return "__undefined__";
+  if (v !== v) return "__NaN__";                  // NaN
+  if (v === Infinity) return "__Infinity__";
+  if (v === -Infinity) return "__-Infinity__";
+  if (Array.isArray(v)) return "[" + v.map(stableKey).join(",") + "]";
+  if (v !== null && typeof v === "object") {
+    const keys = Object.keys(v as object).sort();
+    return "{" + keys.map(k => JSON.stringify(k) + ":" + stableKey((v as Record<string, unknown>)[k])).join(",") + "}";
   }
-  if (isPlainObj(value)) {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      sorted[key] = canonicalize(value[key]);
-    }
-    return sorted;
-  }
-  return value;
+  return JSON.stringify(v) ?? "null";
 }
 
 /**
- * Sortează recursiv toate array-urile dintr-un obiect/array.
- * Returnează valoarea sortată + un flag care indică dacă ceva s-a schimbat.
+ * Normalize object key order recursively (sort keys alphabetically).
+ * Does NOT sort array elements — array order is semantically significant.
+ * Returns {sorted, changed} so the UI can show a notice when normalization happened.
  */
-function sortDeep(value: unknown): { sorted: unknown; changed: boolean } {
+function normalizeKeyOrder(value: unknown): { sorted: unknown; changed: boolean } {
   if (Array.isArray(value)) {
-    const mappedResults = value.map(sortDeep);
-    const mappedArr = mappedResults.map((r) => r.sorted);
-    const innerChanged = mappedResults.some((r) => r.changed);
-    const sortedArr = [...mappedArr].sort((a, b) => naturalCompare(a, b));
-    const orderChanged =
-      innerChanged ||
-      sortedArr.some((v, i) => JSON.stringify(canonicalize(v)) !== JSON.stringify(canonicalize(mappedArr[i])));
-    return { sorted: sortedArr, changed: orderChanged };
+    let anyChanged = false;
+    const mapped = value.map(el => {
+      const { sorted, changed } = normalizeKeyOrder(el);
+      if (changed) anyChanged = true;
+      return sorted;
+    });
+    return { sorted: mapped, changed: anyChanged };
   }
   if (isPlainObj(value)) {
-    // Sort keys alphabetically so objects with same keys in different order compare as equal
-    const sortedKeys = Object.keys(value).sort();
     const originalKeys = Object.keys(value);
+    const sortedKeys = [...originalKeys].sort();
     const keyOrderChanged = sortedKeys.some((k, i) => k !== originalKeys[i]);
     let anyChanged = keyOrderChanged;
     const result: Record<string, unknown> = {};
     for (const key of sortedKeys) {
-      const { sorted, changed } = sortDeep(value[key]);
+      const { sorted, changed } = normalizeKeyOrder(value[key]);
       result[key] = sorted;
       if (changed) anyChanged = true;
     }
@@ -187,34 +178,125 @@ function sortDeep(value: unknown): { sorted: unknown; changed: boolean } {
 
 // ─── Deep Diff Engine ──────────────────────────────────────────────────────────
 
+/**
+ * Array diff strategy:
+ * - If all elements are primitives (or mixed primitives): SET-based diff
+ *   → order-independent, reports added/removed per distinct value
+ * - If elements are objects or arrays: ALIGN by best structural match,
+ *   then recurse → fine-grained diffs inside each matched pair
+ */
+function isPrimitive(v: unknown): boolean {
+  return v === null || v === undefined || typeof v !== "object";
+}
+
+function diffArrays(a: unknown[], b: unknown[], path: string): DiffResult {
+  const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
+
+  const allPrimitivesA = a.every(isPrimitive);
+  const allPrimitivesB = b.every(isPrimitive);
+
+  if (allPrimitivesA && allPrimitivesB) {
+    // Pure primitive arrays: set-based diff (order-independent)
+    const countA = new Map<string, { v: unknown; n: number }>();
+    const countB = new Map<string, { v: unknown; n: number }>();
+    for (const v of a) { const k = stableKey(v); const e = countA.get(k); e ? e.n++ : countA.set(k, { v, n: 1 }); }
+    for (const v of b) { const k = stableKey(v); const e = countB.get(k); e ? e.n++ : countB.set(k, { v, n: 1 }); }
+
+    let sameIdx = 0, addIdx = 0, rmIdx = 0;
+    for (const [k, ea] of countA) {
+      const eb = countB.get(k);
+      const sameN = eb ? Math.min(ea.n, eb.n) : 0;
+      for (let i = 0; i < sameN; i++) diffs.same.push({ path: `${path}[${sameIdx++}]`, value: ea.v });
+      for (let i = sameN; i < ea.n; i++) diffs.removed.push({ path: `${path}[-${rmIdx++}]`, value: ea.v });
+      if (eb) for (let i = sameN; i < eb.n; i++) diffs.added.push({ path: `${path}[+${addIdx++}]`, value: eb.v });
+    }
+    for (const [k, eb] of countB) {
+      if (!countA.has(k)) for (let i = 0; i < eb.n; i++) diffs.added.push({ path: `${path}[+${addIdx++}]`, value: eb.v });
+    }
+    return diffs;
+  }
+
+  // Mixed/complex arrays: match by best structural similarity, recurse
+  const usedB = new Set<number>();
+
+  for (let i = 0; i < a.length; i++) {
+    const va = a[i];
+    const ka = stableKey(va);
+
+    // Try exact match first
+    let matchedJ = -1;
+    for (let j = 0; j < b.length; j++) {
+      if (usedB.has(j)) continue;
+      if (stableKey(b[j]) === ka) { matchedJ = j; break; }
+    }
+
+    if (matchedJ !== -1) {
+      usedB.add(matchedJ);
+      diffs.same.push({ path: `${path}[${i}]`, value: va });
+      continue;
+    }
+
+    // No exact match — find best structural match (same type, most similar)
+    let bestJ = -1;
+    let bestScore = -1;
+    for (let j = 0; j < b.length; j++) {
+      if (usedB.has(j)) continue;
+      const vb = b[j];
+      const sameType = (isPlainObj(va) && isPlainObj(vb)) || (Array.isArray(va) && Array.isArray(vb));
+      if (!sameType) continue;
+      // Score: count of matching keys (for objects) or matching elements (for arrays)
+      let score = 0;
+      if (isPlainObj(va) && isPlainObj(vb)) {
+        const keysA = new Set(Object.keys(va));
+        const keysB = new Set(Object.keys(vb));
+        for (const k of keysA) if (keysB.has(k)) score++;
+        // Boost if a meaningful "id" key matches
+        for (const idKey of ["id", "key", "name", "type"]) {
+          if (keysA.has(idKey) && keysB.has(idKey) && stableKey(va[idKey]) === stableKey((vb as Record<string, unknown>)[idKey])) score += 10;
+        }
+      } else if (Array.isArray(va) && Array.isArray(vb)) {
+        const minLen = Math.min(va.length, vb.length);
+        for (let k = 0; k < minLen; k++) if (stableKey(va[k]) === stableKey(vb[k])) score++;
+      }
+      if (score > bestScore) { bestScore = score; bestJ = j; }
+    }
+
+    if (bestJ !== -1) {
+      usedB.add(bestJ);
+      const n = deepDiff(va, b[bestJ], `${path}[${i}]`);
+      diffs.added.push(...n.added);
+      diffs.removed.push(...n.removed);
+      diffs.changed.push(...n.changed);
+      diffs.same.push(...n.same);
+    } else {
+      diffs.removed.push({ path: `${path}[${i}]`, value: va });
+    }
+  }
+
+  for (let j = 0; j < b.length; j++) {
+    if (!usedB.has(j)) diffs.added.push({ path: `${path}[${j}]`, value: b[j] });
+  }
+
+  return diffs;
+}
+
 function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
   const diffs: DiffResult = { added: [], removed: [], changed: [], same: [] };
 
   if (Array.isArray(a) && Array.isArray(b)) {
-    const len = Math.max(a.length, b.length);
-    for (let i = 0; i < len; i++) {
-      const p = `${path}[${i}]`;
-      if (i >= a.length) diffs.added.push({ path: p, value: b[i] });
-      else if (i >= b.length) diffs.removed.push({ path: p, value: a[i] });
-      else {
-        const n = deepDiff(a[i], b[i], p);
-        diffs.added.push(...n.added);
-        diffs.removed.push(...n.removed);
-        diffs.changed.push(...n.changed);
-        diffs.same.push(...n.same);
-      }
-    }
-    return diffs;
+    return diffArrays(a, b, path);
   }
 
   if (isPlainObj(a) && isPlainObj(b)) {
-    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    const keys = new Set([...Object.keys(a as object), ...Object.keys(b as object)]);
     for (const key of keys) {
       const p = path ? `${path}.${key}` : key;
-      if (!(key in a)) diffs.added.push({ path: p, value: b[key] });
-      else if (!(key in b)) diffs.removed.push({ path: p, value: a[key] });
+      const av = (a as Record<string, unknown>)[key];
+      const bv = (b as Record<string, unknown>)[key];
+      if (!(key in (a as object))) diffs.added.push({ path: p, value: bv });
+      else if (!(key in (b as object))) diffs.removed.push({ path: p, value: av });
       else {
-        const n = deepDiff(a[key], b[key], p);
+        const n = deepDiff(av, bv, p);
         diffs.added.push(...n.added);
         diffs.removed.push(...n.removed);
         diffs.changed.push(...n.changed);
@@ -224,9 +306,10 @@ function deepDiff(a: unknown, b: unknown, path = ""): DiffResult {
     return diffs;
   }
 
-  if (JSON.stringify(a) !== JSON.stringify(b))
+  if (stableKey(a) !== stableKey(b))
     diffs.changed.push({ path: path || "(root)", from: a, to: b });
-  else diffs.same.push({ path: path || "(root)", value: a });
+  else
+    diffs.same.push({ path: path || "(root)", value: a });
 
   return diffs;
 }
@@ -449,8 +532,8 @@ export default function ObjectDiffChecker() {
         throw new Error("Obiect B nu este un obiect sau array valid");
 
       // Sort arrays deeply inside both values before diffing
-      const { sorted: o1, changed: changed1 } = sortDeep(o1raw);
-      const { sorted: o2, changed: changed2 } = sortDeep(o2raw);
+      const { sorted: o1, changed: changed1 } = normalizeKeyOrder(o1raw);
+      const { sorted: o2, changed: changed2 } = normalizeKeyOrder(o2raw);
       setWasSorted(changed1 || changed2);
 
       setResults(deepDiff(o1, o2));
